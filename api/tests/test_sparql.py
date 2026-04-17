@@ -3,15 +3,24 @@
 from http import HTTPStatus
 
 import pytest
+from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 
 from app import app
+from app.routers.sparql import SPARQLRequest, run_sparql
+from app.store import dataset_store
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     """Use the asyncio backend for the anyio fixture."""
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def clear_store() -> None:
+    """Clear the in-memory dataset store before every test."""
+    dataset_store.clear()
 
 
 @pytest.mark.anyio
@@ -336,3 +345,138 @@ async def test_json_ld_without_prefixes() -> None:
         assert data["result_content_type"] == "text/turtle"
     else:
         assert data["result_content_type"] == headers["Accept"]
+
+
+@pytest.mark.anyio
+async def test_sparql_with_dataset_id() -> None:
+    """POST /sparql with a dataset_id should return 200 and query stored data."""
+    data = """
+    @prefix ex: <http://example.org#> .
+    ex:Alice a ex:Person .
+    """
+    query = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        create_resp = await ac.post("/datasets", json={"data": data})
+        assert create_resp.status_code == HTTPStatus.CREATED
+        dataset_id = create_resp.json()["dataset_id"]
+
+        sparql_resp = await ac.post(
+            "/sparql",
+            json={"dataset_id": dataset_id, "query": query},
+        )
+    assert sparql_resp.status_code == HTTPStatus.OK, sparql_resp.json()
+    assert sparql_resp.json()["length"] > 0
+
+
+@pytest.mark.anyio
+async def test_sparql_with_unknown_dataset_id_returns_404() -> None:
+    """POST /sparql with an unknown dataset_id should return 404."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        response = await ac.post(
+            "/sparql",
+            json={
+                "dataset_id": "does-not-exist",
+                "query": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+            },
+        )
+    assert response.status_code == HTTPStatus.NOT_FOUND, response.json()
+
+
+@pytest.mark.anyio
+async def test_sparql_without_data_or_dataset_id_returns_422() -> None:
+    """POST /sparql with neither data nor dataset_id should return 422."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        response = await ac.post(
+            "/sparql",
+            json={"query": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"},
+        )
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_CONTENT, response.json()
+
+
+@pytest.mark.anyio
+async def test_sparql_with_both_data_and_dataset_id_returns_422() -> None:
+    """POST /sparql with both data and dataset_id should return 422."""
+    data = "@prefix ex: <http://example.org#> . ex:Alice a ex:Person ."
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        response = await ac.post(
+            "/sparql",
+            json={
+                "data": data,
+                "dataset_id": "some-id",
+                "query": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+            },
+        )
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_CONTENT, response.json()
+
+
+@pytest.mark.anyio
+async def test_sparql_with_dataset_id_inference_does_not_mutate_store() -> None:
+    """Running inference on a stored dataset must not alter the stored graph."""
+    data = """
+    @prefix ex: <http://example.org#> .
+    ex:Alice a ex:Person .
+    """
+    query = "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        create_resp = await ac.post("/datasets", json={"data": data})
+        dataset_id = create_resp.json()["dataset_id"]
+
+        resp1 = await ac.post(
+            "/sparql",
+            json={"dataset_id": dataset_id, "query": query, "inference": False},
+        )
+        count_before = resp1.json()["length"]
+
+        await ac.post(
+            "/sparql",
+            json={"dataset_id": dataset_id, "query": query, "inference": True},
+        )
+
+        resp3 = await ac.post(
+            "/sparql",
+            json={"dataset_id": dataset_id, "query": query, "inference": False},
+        )
+        count_after = resp3.json()["length"]
+
+    assert count_before == count_after, (
+        f"Inference mutated the stored graph: {count_before} -> {count_after}"
+    )
+
+
+@pytest.mark.anyio
+async def test_run_sparql_raises_422_when_data_is_none() -> None:
+    """Guard clause raises 422 when data is None and dataset_id is None.
+
+    model_construct bypasses the Pydantic validator so we can reach the
+    branch that is otherwise unreachable via the normal HTTP path.
+    """
+    crafted = SPARQLRequest.model_construct(
+        data=None,
+        dataset_id=None,
+        query="SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        inference=False,
+    )
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/sparql",
+        "headers": [],
+        "query_string": b"",
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        await run_sparql(Request(scope), crafted, dataset_store)
+
+    assert exc_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY

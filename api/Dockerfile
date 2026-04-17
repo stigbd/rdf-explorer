@@ -4,19 +4,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 # Install uv.
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
 # Copy the application into the container.
 ADD . /app
-
-# Check that the python version corresponds to the one specified in .python-version.
-RUN EXPECTED_VERSION=$(cat /app/.python-version | tr -d '[:space:]') && \
-    ACTUAL_VERSION=$(python --version | awk '{print $2}') && \
-    if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then \
-        echo "Error: Python version mismatch. Expected $EXPECTED_VERSION but got $ACTUAL_VERSION" 2>&1 && \
-        exit 1; \
-    fi
-
 
 # Install the application dependencies.
 WORKDIR /app

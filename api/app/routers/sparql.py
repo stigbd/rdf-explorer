@@ -3,24 +3,49 @@
 import logging
 from enum import StrEnum
 from http import HTTPStatus
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from owlrl import DeductiveClosure, OWLRL_Semantics
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from rdflib import Graph
 from rdflib.exceptions import Error
 from rdflib.plugins.sparql import prepareQuery
+
+from app.store import DatasetStore, dataset_store
 
 router = APIRouter(tags=["sparql"])
 logger = logging.getLogger("uvicorn.error")
 
 
 class SPARQLRequest(BaseModel):
-    """Request model for running a SPARQL query on RDF data."""
+    """Request model for running a SPARQL query on RDF data.
 
-    data: str
+    Exactly one of ``data`` or ``dataset_id`` must be supplied.
+    """
+
+    data: str | None = None
+    dataset_id: str | None = None
     query: str
     inference: bool = False
+
+    @model_validator(mode="after")
+    def check_data_xor_dataset_id(self) -> SPARQLRequest:
+        """Validate that exactly one of data or dataset_id is provided."""
+        has_data = self.data is not None
+        has_id = self.dataset_id is not None
+        if not has_data and not has_id:
+            msg = """
+            Exactly one of 'data' or 'dataset_id' must be provided; neither was given.
+            """
+            raise ValueError(msg)
+        if has_data and has_id:
+            msg = """
+            Exactly one of 'data' or 'dataset_id' must be provided; b
+            oth were given.
+            """
+            raise ValueError(msg)
+        return self
 
 
 class SPARQLQueryType(StrEnum):
@@ -38,6 +63,11 @@ class SPARQLResponse(BaseModel):
     length: int
     result_content_type: str | None = None
     result: str
+
+
+def get_store() -> DatasetStore:
+    """Dependency that returns the shared dataset store (overridable in tests)."""
+    return dataset_store
 
 
 async def check_content_type(request: Request) -> None:
@@ -59,34 +89,52 @@ async def check_content_type(request: Request) -> None:
         },
     },
 )
-async def run_sparql(request: Request, sparql_request: SPARQLRequest) -> SPARQLResponse:  # noqa: C901
-    """Run the given SPARQL query on the provided RDF data."""
-    # Parse the RDF data into a graph:
+async def run_sparql(  # noqa: C901, PLR0915, PLR0912
+    request: Request,
+    sparql_request: SPARQLRequest,
+    store: Annotated[DatasetStore, Depends(get_store)],
+) -> SPARQLResponse:
+    """Run the given SPARQL query on the provided RDF data or stored dataset."""
     graph = Graph()
-    try:
-        graph.parse(data=sparql_request.data)
-    except Error as e:
-        msg = f"Error: {type(e)} : " + str(e)
-        raise HTTPException(status_code=400, detail=msg) from e
-    except Exception as e:  # pragma: no cover
-        msg = "Invalid RDF data: " + str(e)
-        raise HTTPException(status_code=400, detail=msg) from e
+    raw_data: str
 
-    # Parse the SPARQL query into a query object:
+    if sparql_request.dataset_id is not None:
+        stored = store.get(sparql_request.dataset_id)
+        if stored is None:
+            raise HTTPException(
+                status_code=HTTPStatus.NOT_FOUND,
+                detail=f"Dataset {sparql_request.dataset_id!r} not found",
+            )
+        raw_data, stored_graph = stored
+        # Copy all triples into a fresh graph so inference never mutates
+        #  the stored object.
+        graph += stored_graph
+    else:
+        if sparql_request.data is None:
+            raise HTTPException(status_code=422, detail="...")
+        raw_data = sparql_request.data
+
+        try:
+            graph.parse(data=raw_data)
+        except Error as e:
+            msg = f"Error: {type(e)} : " + str(e)
+            raise HTTPException(status_code=400, detail=msg) from e
+        except Exception as e:  # pragma: no cover
+            msg = "Invalid RDF data: " + str(e)
+            raise HTTPException(status_code=400, detail=msg) from e
+
     try:
         parsed_query = prepareQuery(sparql_request.query)
     except Exception as e:
         msg = "Invalid SPARQL query: " + str(e)
         raise HTTPException(status_code=400, detail=msg) from e
 
-    # Check that the query type is supported:
     try:
         query_type = SPARQLQueryType(parsed_query.algebra.name)
     except ValueError:  # pragma: no cover
         msg = "Unsupported SPARQL query type: " + parsed_query.algebra.name
         raise HTTPException(status_code=501, detail=msg) from None
 
-    # Run inference if requested:
     if sparql_request.inference:
         try:
             DeductiveClosure(OWLRL_Semantics).expand(graph)
@@ -94,24 +142,21 @@ async def run_sparql(request: Request, sparql_request: SPARQLRequest) -> SPARQLR
             msg = "Error running inference: " + str(e)
             raise HTTPException(status_code=400, detail=msg) from e
 
-    # Run the query:
     try:
         qres = graph.query(parsed_query)
     except Exception as e:  # pragma: no cover
         msg = "Error running SPARQL query: " + str(e)
         raise HTTPException(status_code=400, detail=msg) from e
 
-    # Determine the format of the response based on the Accept header:
     serialization_format, media_type = await get_format_and_media_type(
         query_type, request
     )
-    # Serialize the result:
     try:
         length = len(qres)
         if parsed_query.algebra.name == "AskQuery":
             result = "true" if qres.askAnswer else "false"
         elif serialization_format == "json-ld":
-            context = await get_context_from_prefixes_in_data(sparql_request.data)
+            context = await get_context_from_prefixes_in_data(raw_data)
             result = qres.serialize(format=serialization_format, context=context)
         else:
             result = qres.serialize(format=serialization_format)
@@ -127,12 +172,7 @@ async def get_format_and_media_type(
     query_type: str,
     request: Request,
 ) -> tuple[str, str]:
-    """Determine the serialization format and media type.
-
-    Based on the query type and the Accept header in the request.
-    For SELECT and ASK queries, the default format is text/plain.
-    For DESCRIBE and CONSTRUCT queries, the default format is turtle.
-    """
+    """Determine the serialization format and media type."""
     if query_type in [SPARQLQueryType.SELECT, SPARQLQueryType.ASK]:
         return await get_format_and_media_type_for_select_ask(request)
     return await get_format_and_media_type_for_describe_construct(request)
@@ -141,11 +181,7 @@ async def get_format_and_media_type(
 async def get_format_and_media_type_for_select_ask(
     request: Request,
 ) -> tuple[str, str]:
-    """Determine the serialization format and media type for SELECT and ASK queries.
-
-    Based on the Accept header in the request.
-    The default format is applicaiton/sparql-results+json.
-    """
+    """Determine the serialization format and media type for SELECT and ASK queries."""
     accept = request.headers.get("accept", "")
     if not accept or "*/*" in accept:
         return "json", "application/sparql-results+json"
@@ -182,7 +218,6 @@ async def get_format_and_media_type_for_describe_construct(
 
 async def get_context_from_prefixes_in_data(data: str) -> dict[str, str]:
     """Get a JSON-LD context from the prefixes used in the data."""
-    # Add all prefixes used in the data and their corresponding URIs:
     context = {}
     for line in data.splitlines():
         if line.strip().startswith("@prefix"):
