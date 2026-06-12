@@ -1,8 +1,8 @@
 # Build stage
-FROM node:25-slim AS builder
+FROM node:24.16.0-slim AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@11.5.3
+RUN npm install -g pnpm@11.6.0
 
 # Set working directory
 WORKDIR /app
