@@ -105,7 +105,7 @@ export const RDFExplorer: React.FC = () => {
       setQueryType(detectedType);
       // Update template dropdown to the first template matching the detected type
       const matchingKey = Object.keys(QUERY_TEMPLATES).find(
-        (key) => QUERY_TEMPLATES[key].type === detectedType,
+        (key) => QUERY_TEMPLATES[key].type === detectedType
       );
       if (matchingKey) setSelectedTemplate(matchingKey);
       const availableFormats = getAvailableFormats(detectedType);

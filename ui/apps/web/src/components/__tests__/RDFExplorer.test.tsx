@@ -568,9 +568,7 @@ describe('RDFExplorer', () => {
     const textareas = screen.getAllByRole('textbox');
     const queryTextarea = textareas[0];
     await user.clear(queryTextarea);
-    await user.paste(
-      '# A construct query\nCONSTRUCT { ?s ?p ?o . } WHERE { ?s ?p ?o . }',
-    );
+    await user.paste('# A construct query\nCONSTRUCT { ?s ?p ?o . } WHERE { ?s ?p ?o . }');
 
     // Template dropdown should now show Construct Query
     await waitFor(() => {
