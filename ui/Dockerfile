@@ -1,6 +1,8 @@
 # Build stage
 FROM node:24.16.0-slim AS builder
 
+ENV CI=true
+
 # Install pnpm
 RUN npm install -g pnpm@11.6.0
 

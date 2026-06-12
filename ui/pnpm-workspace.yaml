@@ -4,9 +4,10 @@ packages:
 
 allowBuilds:
   esbuild: true
+  "@biomejs/biome": true
 
 onlyBuiltDependencies:
   - "@biomejs/biome"
   - esbuild
 
-useNodeVersion: "25.7.0"
+useNodeVersion: "24.16.0"
