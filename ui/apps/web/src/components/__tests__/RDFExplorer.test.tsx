@@ -550,6 +550,38 @@ describe('RDFExplorer', () => {
     });
   });
 
+  it('updates query template dropdown when pasting a query with a different type', async () => {
+    const user = userEvent.setup();
+    const Wrapper = createWrapper();
+
+    render(
+      <Wrapper>
+        <RDFExplorer />
+      </Wrapper>
+    );
+
+    // Initially shows Select Query template
+    const templateSelector = screen.getByLabelText('Query Template:');
+    expect((templateSelector as HTMLSelectElement).value).toBe('select');
+
+    // Paste a CONSTRUCT query (with a comment, as in real usage)
+    const textareas = screen.getAllByRole('textbox');
+    const queryTextarea = textareas[0];
+    await user.clear(queryTextarea);
+    await user.paste(
+      '# A construct query\nCONSTRUCT { ?s ?p ?o . } WHERE { ?s ?p ?o . }',
+    );
+
+    // Template dropdown should now show Construct Query
+    await waitFor(() => {
+      expect((templateSelector as HTMLSelectElement).value).toBe('construct');
+    });
+
+    // Result format should have switched to turtle
+    const formatSelector = screen.getByLabelText('Result Format:');
+    expect((formatSelector as HTMLSelectElement).value).toBe('turtle');
+  });
+
   it('applies correct CSS styles', () => {
     const Wrapper = createWrapper();
     render(

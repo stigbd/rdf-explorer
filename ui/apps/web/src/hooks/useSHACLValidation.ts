@@ -1,6 +1,6 @@
-import { useMutation } from '@tanstack/react-query';
-import type { SHACLValidationRequest } from '@rdf-explorer/types';
 import { createSPARQLClient } from '@rdf-explorer/api-client';
+import type { SHACLValidationRequest } from '@rdf-explorer/types';
+import { useMutation } from '@tanstack/react-query';
 
 interface UseSHACLValidationOptions {
   onSuccess?: (data: string, executionDuration: number, resultLength: number) => void;

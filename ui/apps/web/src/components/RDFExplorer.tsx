@@ -1,7 +1,7 @@
 import type { QueryType, SerializationFormat } from '@rdf-explorer/types';
 import { CodeEditor, LoadingSpinner, PrefixesList, ResultsTable } from '@rdf-explorer/ui';
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   DEFAULT_QUERY,
   DEFAULT_SHACL_SHAPES,
@@ -19,14 +19,17 @@ type ActiveTab = 'sparql' | 'shacl';
 const detectQueryType = (query: string): QueryType => {
   const upperQuery = query.trim().toUpperCase();
 
-  // Remove PREFIX declarations to get to the actual query type
-  const queryWithoutPrefixes = upperQuery.replace(/PREFIX\s+\w+:\s*<[^>]+>\s*/g, '').trim();
+  // Remove single-line comments, PREFIX declarations, and blank lines
+  const cleaned = upperQuery
+    .replace(/^\s*#.*$/gm, '')
+    .replace(/PREFIX\s+\S+\s*<[^>]+>\s*/g, '')
+    .trim();
 
   // Check CONSTRUCT and DESCRIBE first since they may contain SELECT in WHERE clause
-  if (queryWithoutPrefixes.startsWith('CONSTRUCT')) return 'construct';
-  if (queryWithoutPrefixes.startsWith('DESCRIBE')) return 'describe';
-  if (queryWithoutPrefixes.startsWith('ASK')) return 'ask';
-  if (queryWithoutPrefixes.startsWith('SELECT')) return 'select';
+  if (cleaned.startsWith('CONSTRUCT')) return 'construct';
+  if (cleaned.startsWith('DESCRIBE')) return 'describe';
+  if (cleaned.startsWith('ASK')) return 'ask';
+  if (cleaned.startsWith('SELECT')) return 'select';
   return 'select'; // default
 };
 
@@ -80,6 +83,7 @@ export const RDFExplorer: React.FC = () => {
   const [query, setQuery] = useState<string>(DEFAULT_QUERY);
   const [queryType, setQueryType] = useState<QueryType>('select');
   const [selectedFormat, setSelectedFormat] = useState<SerializationFormat>('sparql-json');
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('select');
 
   // SHACL state
   const [shapes, setShapes] = useState<string>(DEFAULT_SHACL_SHAPES);
@@ -88,22 +92,28 @@ export const RDFExplorer: React.FC = () => {
   const { prefixes, isLoading: isPrefixesLoading, error: prefixesError } = usePrefixes();
 
   // Detect query type when query changes (but only when typing, not when using templates)
-  useEffect(() => {
-    if (activeTab !== 'sparql') return;
-
-    const detectedType = detectQueryType(query);
-
-    // Only update if the detected type is different from current type
+  const handleQueryChange = (newQuery: string) => {
+    setQuery(newQuery);
+    // Don't change the query type when the editor has no actual query body
+    const bodyWithoutPrefixesAndComments = newQuery
+      .replace(/^\s*#.*$/gm, '')
+      .replace(/PREFIX\s+\S+\s*<[^>]+>\s*/gi, '')
+      .trim();
+    if (!bodyWithoutPrefixesAndComments) return;
+    const detectedType = detectQueryType(newQuery);
     if (detectedType !== queryType) {
       setQueryType(detectedType);
-
-      // If current format is not valid for the new query type, switch to default
+      // Update template dropdown to the first template matching the detected type
+      const matchingKey = Object.keys(QUERY_TEMPLATES).find(
+        (key) => QUERY_TEMPLATES[key].type === detectedType,
+      );
+      if (matchingKey) setSelectedTemplate(matchingKey);
       const availableFormats = getAvailableFormats(detectedType);
       if (!availableFormats.includes(selectedFormat)) {
         setSelectedFormat(getDefaultFormat(detectedType));
       }
     }
-  }, [query, queryType, selectedFormat, activeTab]);
+  };
 
   const { executeQuery, isLoading: isSparqlLoading } = useSPARQLQuery({
     onSuccess: (data, executionDuration, resultLength) => {
@@ -161,8 +171,8 @@ export const RDFExplorer: React.FC = () => {
   const handleTemplateChange = (templateKey: string) => {
     const template = QUERY_TEMPLATES[templateKey];
     if (template) {
-      // Batch all state updates together to ensure they happen synchronously
       const newFormat = getDefaultFormat(template.type);
+      setSelectedTemplate(templateKey);
       setQueryType(template.type);
       setSelectedFormat(newFormat);
       setQuery(template.query);
@@ -502,8 +512,8 @@ export const RDFExplorer: React.FC = () => {
             <select
               id="query-template"
               className="select"
+              value={selectedTemplate}
               onChange={(e) => handleTemplateChange(e.target.value)}
-              defaultValue="select"
             >
               {Object.entries(QUERY_TEMPLATES).map(([key, template]) => (
                 <option key={key} value={key}>
@@ -586,7 +596,7 @@ export const RDFExplorer: React.FC = () => {
               <p className="editor-hint">Enter your SPARQL query below</p>
               <CodeEditor
                 value={query}
-                onChange={setQuery}
+                onChange={handleQueryChange}
                 language="sparql"
                 placeholder="Enter your SPARQL query here..."
                 minHeight="400px"

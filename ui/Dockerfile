@@ -1,8 +1,8 @@
 # Build stage
-FROM node:20-alpine AS builder
+FROM node:25-slim AS builder
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+RUN npm install -g pnpm@11.5.3
 
 # Set working directory
 WORKDIR /app
@@ -14,7 +14,7 @@ COPY packages/types/package.json ./packages/types/
 COPY packages/api-client/package.json ./packages/api-client/
 COPY packages/ui/package.json ./packages/ui/
 
-# Copy pnpm lockfileif it exists
+# Copy pnpm lockfile if it exists
 COPY pnpm-lock.yaml ./
 
 # Install dependencies
@@ -34,6 +34,7 @@ FROM nginx:alpine
 RUN echo 'server { \
     listen 3000; \
     server_name _; \
+    client_max_body_size 100M; \
     root /usr/share/nginx/html; \
     index index.html; \
     \
